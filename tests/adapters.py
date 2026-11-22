@@ -92,7 +92,11 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    swiglu = modules.SwiGLUFF(d_model=d_model, d_ff=d_ff)
+    swiglu.w1.w.data = w1_weight.transpose(0, 1)
+    swiglu.w2.w.data = w2_weight.transpose(0, 1)
+    swiglu.w3.w.data = w3_weight.transpose(0, 1)
+    return swiglu(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -113,7 +117,7 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    return modules.scaled_dot_product_attention(K, Q, V, mask)
 
 
 def run_multihead_self_attention(
@@ -147,8 +151,10 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
-
+    attn = modules.MultiHeadSelfAttention(d_model, num_heads, with_rope=False)
+    Module.load_state_dict(attn, {"q.w": q_proj_weight.transpose(0, 1), "k.w": k_proj_weight.transpose(0, 1), 
+                                  'v.w': v_proj_weight.transpose(0, 1), 'o.w': o_proj_weight.transpose(0, 1)})
+    return attn(in_features)
 
 def run_multihead_self_attention_with_rope(
     d_model: int,
@@ -187,7 +193,10 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    attn = modules.MultiHeadSelfAttention(d_model, num_heads, with_rope=True, theta=theta, max_seq_len=max_seq_len)
+    Module.load_state_dict(attn, {"q.w": q_proj_weight.transpose(0, 1), "k.w": k_proj_weight.transpose(0, 1),
+                                   'v.w': v_proj_weight.transpose(0, 1), 'o.w': o_proj_weight.transpose(0, 1)})
+    return attn(in_features)
 
 
 def run_rope(
@@ -209,7 +218,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    rope = modules.RoPE(theta, d_k, max_seq_len)
+    return rope(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
@@ -282,7 +292,18 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    block = modules.Block(d_model, num_heads, d_ff, max_seq_len, theta)
+    d = {"attn.q.w": weights['attn.q_proj.weight'].transpose(0, 1),
+         "attn.k.w": weights['attn.k_proj.weight'].transpose(0, 1),
+         "attn.v.w": weights['attn.v_proj.weight'].transpose(0, 1), 
+         "attn.o.w": weights['attn.output_proj.weight'].transpose(0, 1),
+         "attn_norm.gain": weights['ln1.weight'],
+         "ff_norm.gain": weights['ln2.weight'],
+         "ff.w1.w": weights['ffn.w1.weight'].transpose(0, 1),
+         "ff.w2.w": weights['ffn.w2.weight'].transpose(0, 1),
+         "ff.w3.w": weights['ffn.w3.weight'].transpose(0, 1)}
+    block.load_state_dict(d)
+    return block(in_features)
 
 
 def run_transformer_lm(
@@ -364,7 +385,42 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    lm = modules.TransformerLM(d_model, num_heads, d_ff, vocab_size, context_length, num_layers, rope_theta)
+    state = {}
+    for name in weights:
+        if name.startswith("layers."):
+            layer = name.split('.')[1]
+            if "q_proj" in name:
+                state[f'blocks.{layer}.attn.q.w'] = weights[name].transpose(0, 1)
+            elif "v_proj" in name:
+                state[f'blocks.{layer}.attn.v.w'] = weights[name].transpose(0, 1)
+            elif "k_proj" in name:
+                state[f'blocks.{layer}.attn.k.w'] = weights[name].transpose(0, 1)
+            elif "output_proj" in name:
+                state[f'blocks.{layer}.attn.o.w'] = weights[name].transpose(0, 1)
+            elif "ln1" in name:
+                state[f'blocks.{layer}.attn_norm.gain'] = weights[name]
+            elif "w1" in name:
+                state[f'blocks.{layer}.ff.w1.w'] = weights[name].transpose(0, 1)
+            elif "w2" in name:
+                state[f'blocks.{layer}.ff.w2.w'] = weights[name].transpose(0, 1)
+            elif "w3" in name:
+                state[f'blocks.{layer}.ff.w3.w'] = weights[name].transpose(0, 1)
+            elif "ln2" in name:
+                state[f'blocks.{layer}.ff_norm.gain'] = weights[name]
+            else:
+                raise RuntimeError(f"Unrecognized name: {name}")
+        elif name == "token_embeddings.weight":
+            state["emb.w"] = weights[name]
+        elif name == "ln_final.weight":
+            state["norm.gain"] = weights[name]
+        elif name == "lm_head.weight":
+            state["linear.w"] = weights[name].transpose(0, 1)
+        else:
+            raise RuntimeError(f"Unrecognized name: {name}")
+
+    lm.load_state_dict(state)
+    return lm(in_indices)
 
 
 def run_rmsnorm(
@@ -426,7 +482,7 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    return modules.load_data(dataset, batch_size, context_length, device)
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -442,7 +498,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    return modules.softmax(in_features, dim)
 
 
 def run_cross_entropy(
@@ -460,7 +516,7 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    return modules.cross_entropy(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -472,14 +528,14 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    modules.gradient_clipping(parameters, max_l2_norm)
 
 
 def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return modules.AdamW
 
 
 def run_get_lr_cosine_schedule(
@@ -507,7 +563,7 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    return modules.get_schedule(it, max_learning_rate, min_learning_rate, warmup_iters, cosine_cycle_iters)
 
 
 def run_save_checkpoint(
@@ -526,7 +582,7 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    modules.save_checkpoint(model, optimizer, iteration, out)
 
 
 def run_load_checkpoint(
@@ -547,7 +603,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    return modules.load_checkpoint(src, model, optimizer)
 
 
 def get_tokenizer(

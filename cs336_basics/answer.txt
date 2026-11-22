@@ -1,0 +1,67 @@
+Transformer LM resource accounting (5 points):
+a.
+emb: vocab_size * d_model
+one block:
+ norm: 2 * d_model
+ attn: 4 * d_model * d_model
+ ffwd: 3 * d_model * d_ff
+norm: d_model
+linear: d_model * vocab_size
+1640452800 params
+1.6 GB for loading the model
+b.
+emb: no ops
+block:
+  norm: d_model * context_len * 6 * 2 (two norms)
+  attn:
+     kqv calc: d_model * d_model * context_len * 2 * 3
+     rope: 8 * d_model / 2 * 2 (for q and k)
+     kqv product: 2 * d_model * context_len * context_len (kq) + context_len * context_len (sqrt) + 2 * context_len * context_len (softmax) + context_len * context_len * d_model * 2 (kq * v) + 2 * context_len * d_model * d_model (kqv * o)
+  ff: d_model * d_ff * context_len * 2 + d_ff * context_len * 4 + d_model * d_ff * context_len * 2 + d_ff * d_model * context_len * 2
+  residual conn: 2 * d_model * context_len
+norm: ignored
+linear: 2 * d_model * vocab_size * context_len
+so total only listing important ones
+block:
+attn: d_model ** 2 * context_len * 8 + context_len ** 2 * d_model * 4
+ff: d_model * d_ff * context_len * 6
+roughly 3.3trillion flops
+c.
+feed forward requires the most flops, then it is the attention calculation
+d. d_model and layer size growth proportionally take more flops
+e. flops increased by 256x and now the attn mechanism becomes the new bottleneck.
+
+
+AdamW accounting:
+a. 
+input: 4 * d_model * vocab_size (params + adam_mv + gradient)
+blocks:
+norm (multiple by 2): 4 * d_model  (params + adam_mv + gradient) + batch_size * context_len * d_model (activation)
+attention: d_model ** 2 * 4 * 4 (params + adam_mv + gradient) + context_len * batch_size * d_model * 5 (k,q,v,o + kq * v) + batch_size * num_heads * context_len ** 2 * 2(kq + softmax)
+ff: d_model ** 2 * 8/3 * 3 * 4 (params + adam_mv + gradient) + context_len * batch_size * d_model * (1 + 4 * 8/3) (silu + (w1 * w3) @ w2)
+
+final norm: 4 * d_model  (params + adam_mv + gradient) + batch_size * context_len * d_model (activation)
+output: d_model * vocab_size * 4 (params + adam_mv + gradient) + batch_size * context_len * vocab_size(activation)
+cross-entropy: 5 * batch_size * context_len * vocab_size
+
+block_total: context_len * batch_size * d_model * (8 + 8/3 * 4) + batch_size * num_heads * context_len ** 2 * 2 + d_model ** 2 * (4 * 4 + 8/3 * 3 * 4) = (18.6 *  context_len * batch_size * d_model + d_model ** 2 * 48 + batch_size * num_heads * context_len ** 2 * 2) * num_layers * 4 (bytes)
+input/output = 8 * 4 * d_model * vocab_size
+total = (18.6 *  context_len * batch_size * d_model + d_model ** 2 * 48 + batch_size * num_heads * context_len ** 2 * 2) * num_layers * 4 + 32 * d_model * vocab_size
+
+note: intentionally omitted calculations other than the ones in blocks and input/output, since they don't count a lot towards total. Also omitted 2 * 4 * d_model in pre_norm
+
+
+b. 
+16e9 * batch_size + 26e9, max batch size is 3
+
+c. 
+m_update * 3 + v_update * 4 + 2 * p_decay + 5 * p_final_update = 14 * param_size
+input_output_param_size = d_model * vocab_size * 2
+block_param_size = (d_model ** 2 * 4 + d_model ** 2 * 8/3 * 3) * num_blocks
+
+((d_model ** 2 * 4 + d_model ** 2 * 8/3 * 3) * num_blocks + d_model * vocab_size * 2) * 14
+note: pre-norm is ignored
+
+d. forward 3.3trillion
+total = (3 * forward * batch_size + adamw) * 4e5  = (3 * 3.3e12 * 1024 + (can be ignored)) * 4e5 = 40e20
+40e20 / 247.5e12 = 185 days
