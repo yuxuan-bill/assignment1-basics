@@ -55,6 +55,13 @@ validation_token_file = "/Users/yuxlu/Documents/learning/assignment1-basics/data
 
 bpe_merges = "/Users/yuxlu/Documents/learning/assignment1-basics/data/tiny_stories_merges"
 bpe_vocab = "/Users/yuxlu/Documents/learning/assignment1-basics/data/tiny_stories_vocab"
+
+# ckpt_folder = "/workspace/data/tiny_stories"
+# train_token_file = "/workspace/data/TinyStoriesV2-GPT4-train.txt.tokens"
+# validation_token_file = "/workspace/data/TinyStoriesV2-GPT4-valid.txt.tokens"
+
+# bpe_merges = "/workspace/data/tiny_stories_merges"
+# bpe_vocab = "/workspace/data/tiny_stories_vocab"
 special_tokens = ["<|endoftext|>"]
 
 
